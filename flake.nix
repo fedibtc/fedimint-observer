@@ -68,7 +68,7 @@
                 pname = "fmo_server";
                 version = "0.1.0";
                 src = rustSrc;
-                cargoExtraArgs = "--package=fmo_server";
+                cargoExtraArgs = "--package=fmo_server --features=stability_pool_v1";
                 RUSTFLAGS = "--cfg tokio_unstable";
               });
             in
