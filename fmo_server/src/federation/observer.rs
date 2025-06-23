@@ -37,7 +37,7 @@ use stability_pool_common::{StabilityPoolConsensusItem, StabilityPoolInput, Stab
 use tokio::time::sleep;
 use tokio_postgres::NoTls;
 use tracing::log::info;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info_span, warn, Instrument};
 
 use crate::federation::db::{Federation, FederationV0};
 use crate::federation::{db, decoders_from_config, instance_to_kind};
@@ -102,37 +102,39 @@ impl FederationObserver {
     async fn spawn_observer(&self, federation: Federation) {
         let slf = self.clone();
 
-        let federation_inner = federation.clone();
+        let federation_id = federation.federation_id;
+        let config = federation.config.clone();
         self.task_group.spawn_cancellable(
-            format!("Observer for {}", federation_inner.federation_id),
+            format!("Observer for {}", federation_id),
             async move {
                 loop {
                     let e = slf
-                        .observe_federation_history(
-                            federation_inner.federation_id,
-                            federation_inner.config.clone(),
-                        )
+                        .observe_federation_history(federation_id, config.clone())
                         .await
                         .expect_err("observer task exited unexpectedly");
                     error!("Observer errored, restarting in 30s: {e}");
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
-            },
+            }
+            .instrument(info_span!("observer", fed = %federation_id.to_prefix())),
         );
 
         let slf = self.clone();
+        let federation_id = federation.federation_id;
+        let config = federation.config;
         self.task_group.spawn_cancellable(
-            format!("Health Monitor for {}", federation.federation_id),
+            format!("Health Monitor for {}", federation_id),
             async move {
                 loop {
                     let e = slf
-                        .monitor_health(federation.federation_id, federation.config.clone())
+                        .monitor_health(federation_id, config.clone())
                         .await
                         .expect_err("health monitor task exited unexpectedly");
                     error!("Health Monitor errored, restarting in 30s: {e}");
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
-            },
+            }
+            .instrument(info_span!("health", fed = %federation_id.to_prefix())),
         );
     }
 
@@ -747,17 +749,18 @@ impl FederationObserver {
                     (Some(amount_msat), None)
                 }
                 "wallet" => {
-                    let amount_msat = input
+                    // TODO: recognize v1 wallet inputs
+                    if let Some(v0_input) = input
                         .as_any()
                         .downcast_ref::<WalletInput>()
                         .expect("Not Wallet input")
                         .maybe_v0_ref()
-                        .expect("Not v0")
-                        .0
-                        .tx_output()
-                        .value
-                        * 1000;
-                    (Some(amount_msat), None)
+                    {
+                        let amount_msat = v0_input.0.tx_output().value * 1000;
+                        (Some(amount_msat), None)
+                    } else {
+                        (None, None)
+                    }
                 }
                 _ => (None, None),
             };
@@ -776,34 +779,38 @@ impl FederationObserver {
             .await?;
 
             if kind.as_str() == "wallet" {
-                let peg_in_proof = &input
+                // TODO: recognize v1 wallet inputs
+                if let Some(v0_input) = input
                     .as_any()
                     .downcast_ref::<WalletInput>()
                     .expect("Not Wallet input")
                     .maybe_v0_ref()
-                    .expect("Not v0")
-                    .0;
+                {
+                    let peg_in_proof = &v0_input.0;
 
-                let outpoint = peg_in_proof.outpoint();
+                    let outpoint = peg_in_proof.outpoint();
 
-                let address = bitcoin::Address::from_script(
-                    bitcoin::Script::from_bytes(peg_in_proof.tx_output().script_pubkey.as_bytes()),
-                    bitcoin::Network::Bitcoin,
-                )
-                .expect("Invalid output address");
+                    let address = bitcoin::Address::from_script(
+                        bitcoin::Script::from_bytes(
+                            peg_in_proof.tx_output().script_pubkey.as_bytes(),
+                        ),
+                        bitcoin::Network::Bitcoin,
+                    )
+                    .expect("Invalid output address");
 
-                dbtx.execute(
-                        "INSERT INTO wallet_peg_ins VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
-                        &[
-                            &outpoint.txid[..].to_owned(),
-                            &(outpoint.vout as i32),
-                            &address.to_string(),
-                            &maybe_amount_msat.map(|amt| amt as i64).expect("Wallet input must have amount"),
-                            &federation_id.consensus_encode_to_vec(),
-                            &fedimint_txid.consensus_encode_to_vec(),
-                            &(in_idx as i32),
-                        ]
-                    ).await?;
+                    dbtx.execute(
+                            "INSERT INTO wallet_peg_ins VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+                            &[
+                                &outpoint.txid[..].to_owned(),
+                                &(outpoint.vout as i32),
+                                &address.to_string(),
+                                &maybe_amount_msat.map(|amt| amt as i64).expect("Wallet input must have amount"),
+                                &federation_id.consensus_encode_to_vec(),
+                                &fedimint_txid.consensus_encode_to_vec(),
+                                &(in_idx as i32),
+                            ]
+                        ).await?;
+                }
             }
 
             let json_txi: Option<serde_json::Value> = match kind.as_str() {
@@ -884,7 +891,7 @@ impl FederationObserver {
                     let ln_output = output
                         .as_any()
                         .downcast_ref::<LightningOutput>()
-                        .expect("Not LN input")
+                        .expect("Not LN output")
                         .maybe_v0_ref()
                         .expect("Not v0");
                     let (maybe_amount_msat, ln_contract_interaction_kind, contract_id) =
@@ -927,7 +934,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<MintOutput>()
-                        .expect("Not Mint input")
+                        .expect("Not Mint output")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount
@@ -938,7 +945,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<WalletOutput>()
-                        .expect("Not Wallet input")
+                        .expect("Not Wallet output")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount()
@@ -967,7 +974,7 @@ impl FederationObserver {
                 let wallet_v0_output = output
                     .as_any()
                     .downcast_ref::<WalletOutput>()
-                    .expect("Not Wallet input")
+                    .expect("Not Wallet output")
                     .maybe_v0_ref()
                     .expect("Not v0");
 
@@ -1084,6 +1091,7 @@ impl FederationObserver {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_ci(
         dbtx: &Transaction<'_>,
         federation_id: FederationId,
