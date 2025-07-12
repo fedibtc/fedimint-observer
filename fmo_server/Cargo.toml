@@ -1,6 +1,6 @@
 [package]
 name = "fmo_server"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -17,10 +17,10 @@ anyhow = "1.0.81"
 async-stream = "0.3.5"
 axum = { version = "0.7.5", features = ["json"] }
 axum-auth = "0.7.0"
-bitcoin = "0.30.2"
+bitcoin = "0.32.5"
 csv = "1.3.0"
 dotenv = "0.15.0"
-esplora-client = { version = "0.7.0", default-features = false, features = [
+esplora-client = { version = "0.10.0", default-features = false, features = [
     "async-https-rustls",
 ] }
 fmo_api_types = { path = "../fmo_api_types" }
@@ -46,7 +46,12 @@ tower-http = { version = "0.5.2", features = ["cors"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 regex = "1.10.4"
 
-stability-pool-common = { git = "https://github.com/tacio/fedi", branch = "fmo-compatible", optional = true }
+# The `stability_pool` feature requires two different versions of the `stability-pool-common` crate.
+# stability-pool-common-old is associated with the kind = stability_pool
+# stability-pool-common is associated with the kind = multi_sig_stability_pool
+stability-pool-common-old = { git = "https://github.com/fedixyz/fedi", tag = "v25.7.1", optional = true, package = "stability-pool-common-old" }
+stability-pool-common = { git = "https://github.com/fedixyz/fedi", tag = "v25.7.1", optional = true }
 
 [features]
-stability_pool_v1 = ["dep:stability-pool-common"]
+# This feature is optional and intended for specific deployments that require stability pool functionality.
+stability_pool = ["dep:stability-pool-common-old", "dep:stability-pool-common"]

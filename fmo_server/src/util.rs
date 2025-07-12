@@ -4,14 +4,18 @@ use fedimint_core::core::{ModuleInstanceId, ModuleKind};
 use fedimint_core::encoding::DynRawFallback;
 use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::CommonModuleInit;
+use fedimint_core::util::SafeUrl;
 use fedimint_ln_common::LightningCommonInit;
 use fedimint_mint_common::MintCommonInit;
 use fedimint_wallet_common::WalletCommonInit;
 use hex::ToHex;
 use postgres_from_row::FromRow;
 use serde_json::json;
-#[cfg(feature = "stability_pool_v1")]
+#[cfg(feature = "stability_pool")]
 use stability_pool_common::StabilityPoolCommonGen;
+#[cfg(feature = "stability_pool")]
+use stability_pool_common_old::StabilityPoolCommonGen as StabilityPoolCommonGenOld;
+use tracing::debug;
 
 pub fn config_to_json(cfg: ClientConfig) -> anyhow::Result<JsonClientConfig> {
     let decoders = get_decoders(
@@ -65,8 +69,10 @@ pub fn get_decoders(
                 "ln" => LightningCommonInit::decoder(),
                 "wallet" => WalletCommonInit::decoder(),
                 "mint" => MintCommonInit::decoder(),
-                #[cfg(feature = "stability_pool_v1")]
-                "stability_pool" => StabilityPoolCommonGen::decoder(),
+                #[cfg(feature = "stability_pool")]
+                "stability_pool" => StabilityPoolCommonGenOld::decoder(),
+                #[cfg(feature = "stability_pool")]
+                "multi_sig_stability_pool" => StabilityPoolCommonGen::decoder(),
                 _ => {
                     return None;
                 }
@@ -136,4 +142,44 @@ where
         .iter()
         .map(T::try_from_row)
         .collect::<Result<_, _>>()?)
+}
+
+pub fn cleanup_peer_url(api_endpoint: &fedimint_core::util::SafeUrl) -> SafeUrl {
+    let api_endpoint_str = api_endpoint.as_str();
+    const API_REPLACEMENT_LIST: &[(&str, &str)] = &[
+        (
+            "wss://outlying-mouse-4ex5u4hthfuo44e6z7gb.wnext.app/ws/",
+            "wss://api.alpha.wlc.f.8fa.in/",
+        ),
+        (
+            "wss://third-alligator-vrj3e2jue57qllu7ktje.wnext.app/ws/",
+            "wss://api.bravo.wlc.f.8fa.in/",
+        ),
+        (
+            "wss://blank-orc-e6o4bhwtlrasdrmfpend.wnext.app/ws/",
+            "wss://api.charlie.wlc.f.8fa.in/",
+        ),
+        (
+            "wss://dependable-distribution-rc47wuqts5mdhq35v7x6.wnext.app/ws/",
+            "wss://api.delta.wlc.f.8fa.in/",
+        ),
+    ];
+
+    let final_url_str = API_REPLACEMENT_LIST
+        .iter()
+        .find_map(|(search_url, replacement_url)| {
+            if *search_url == api_endpoint_str {
+                debug!(
+                    "Replacing API URL '{search_url}' with '{replacement_url}', quick-fix for fedimint/fedimint#5482"
+                );
+                Some(*replacement_url)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(api_endpoint_str);
+
+    final_url_str
+        .parse()
+        .expect("URL should be valid as it is derived from known-good URLs")
 }

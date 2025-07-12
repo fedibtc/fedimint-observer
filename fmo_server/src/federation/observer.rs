@@ -8,8 +8,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, OutPoint, Txid};
 use chrono::{DateTime, NaiveDate};
 use deadpool_postgres::{GenericClient, Runtime, Transaction};
+use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::DynGlobalApi;
-use fedimint_api_client::download_from_invite_code;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::core::DynModuleConsensusItem;
 use fedimint_core::encoding::Encodable;
@@ -17,7 +17,7 @@ use fedimint_core::epoch::ConsensusItem;
 use fedimint_core::invite_code::InviteCode;
 use fedimint_core::session_outcome::SessionOutcome;
 use fedimint_core::task::TaskGroup;
-use fedimint_core::util::backon::{ConstantBuilder, FibonacciBuilder};
+use fedimint_core::util::backoff_util::background_backoff;
 use fedimint_core::util::retry;
 use fedimint_core::{Amount, PeerId};
 use fedimint_ln_common::contracts::{Contract, IdentifiableContract};
@@ -32,8 +32,13 @@ use fmo_api_types::{
 use futures::future::join_all;
 use futures::StreamExt;
 use postgres_from_row::FromRow;
-#[cfg(feature = "stability_pool_v1")]
+#[cfg(feature = "stability_pool")]
 use stability_pool_common::{StabilityPoolConsensusItem, StabilityPoolInput, StabilityPoolOutput};
+#[cfg(feature = "stability_pool")]
+use stability_pool_common_old::{
+    StabilityPoolConsensusItem as StabilityPoolConsensusItemOld,
+    StabilityPoolInput as StabilityPoolInputOld, StabilityPoolOutput as StabilityPoolOutputOld,
+};
 use tokio::time::sleep;
 use tokio_postgres::NoTls;
 use tracing::log::info;
@@ -41,7 +46,7 @@ use tracing::{debug, error, info_span, warn, Instrument};
 
 use crate::federation::db::{Federation, FederationV0};
 use crate::federation::{db, decoders_from_config, instance_to_kind};
-use crate::util::{execute, query, query_one, query_opt, query_value};
+use crate::util::{cleanup_peer_url, execute, query, query_one, query_opt, query_value};
 
 type BackfillFn = for<'a> fn(
     &'a FederationObserver,
@@ -116,7 +121,7 @@ impl FederationObserver {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             }
-            .instrument(info_span!("observer", fed = %federation_id.to_prefix())),
+            .instrument(info_span!("sessions", fed = %federation_id.to_prefix())),
         );
 
         let slf = self.clone();
@@ -385,7 +390,7 @@ impl FederationObserver {
                     .first_key_value()
                     .expect("At least one peer");
                 let invite = InviteCode::new(
-                    first_peer_url.url.clone(),
+                    cleanup_peer_url(&first_peer_url.url.clone()),
                     *first_peer_id,
                     federation.federation_id,
                     None,
@@ -471,7 +476,9 @@ impl FederationObserver {
             return Ok(federation_id);
         }
 
-        let config = download_from_invite_code(invite).await?;
+        let config = Connector::default()
+            .download_from_invite_code(invite)
+            .await?;
 
         self.connection()
             .await?
@@ -585,9 +592,10 @@ impl FederationObserver {
                 .global
                 .api_endpoints
                 .iter()
-                .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone())),
+                .map(|(&peer_id, peer_url)| (peer_id, cleanup_peer_url(&peer_url.url.clone()))),
             &None,
-        );
+        )
+        .await?;
         let decoders = decoders_from_config(&config);
 
         info!("Starting background job for {federation_id}");
@@ -602,9 +610,7 @@ impl FederationObserver {
                 async move {
                     let signed_session_outcome = retry(
                         format!("Waiting for session {session_index}"),
-                        ConstantBuilder::default()
-                            .with_delay(Duration::from_secs(1))
-                            .with_max_times(usize::MAX),
+                        background_backoff(),
                         || async {
                             api_fetch_single
                                 .await_block(session_index, &decoders_single)
@@ -749,18 +755,21 @@ impl FederationObserver {
                     (Some(amount_msat), None)
                 }
                 "wallet" => {
-                    // TODO: recognize v1 wallet inputs
-                    if let Some(v0_input) = input
+                    let amount = match input
                         .as_any()
                         .downcast_ref::<WalletInput>()
                         .expect("Not Wallet input")
-                        .maybe_v0_ref()
                     {
-                        let amount_msat = v0_input.0.tx_output().value * 1000;
-                        (Some(amount_msat), None)
-                    } else {
-                        (None, None)
-                    }
+                        WalletInput::V0(wallet_input) => wallet_input.tx_output().value,
+                        WalletInput::V1(wallet_input) => wallet_input.tx_out.value,
+                        _ => {
+                            panic!("Unsupported WalletInput version");
+                        }
+                    };
+
+                    let amount_msat = amount.to_sat() * 1000;
+
+                    (Some(amount_msat), None)
                 }
                 _ => (None, None),
             };
@@ -850,8 +859,8 @@ impl FederationObserver {
                         None
                     }
                 },
-                #[cfg(feature = "stability_pool_v1")]
-                "stability_pool" => match input.as_any().downcast_ref::<StabilityPoolInput>() {
+                #[cfg(feature = "stability_pool")]
+                "stability_pool" => match input.as_any().downcast_ref::<StabilityPoolInputOld>() {
                     Some(input) => {
                         let value = serde_json::to_value(input)
                             .expect("Should be able to serialize to JSON");
@@ -863,6 +872,21 @@ impl FederationObserver {
                         None
                     }
                 },
+                #[cfg(feature = "stability_pool")]
+                "multi_sig_stability_pool" => {
+                    match input.as_any().downcast_ref::<StabilityPoolInput>() {
+                        Some(input) => {
+                            let value = serde_json::to_value(input)
+                                .expect("Should be able to serialize to JSON");
+                            debug!("found Multi-Sig Stability Pool Input: {value:?}");
+                            Some(value)
+                        }
+                        None => {
+                            warn!("could not downcast (check decoders registry). {input:?}");
+                            None
+                        }
+                    }
+                }
                 other => {
                     warn!("Transaction Input of kind {other}. Not implemented.");
                     None
@@ -1053,20 +1077,36 @@ impl FederationObserver {
                         None
                     }
                 },
-                #[cfg(feature = "stability_pool_v1")]
-                "stability_pool" => match output.as_any().downcast_ref::<StabilityPoolOutput>() {
-                    Some(output) => {
-                        let value = serde_json::to_value(output)
-                            .expect("Should be able to serialize to JSON");
-                        debug!("found Stability Pool Output: {value:?}");
-                        Some(value)
+                #[cfg(feature = "stability_pool")]
+                "stability_pool" => {
+                    match output.as_any().downcast_ref::<StabilityPoolOutputOld>() {
+                        Some(output) => {
+                            let value = serde_json::to_value(output)
+                                .expect("Should be able to serialize to JSON");
+                            debug!("found Stability Pool Output: {value:?}");
+                            Some(value)
+                        }
+                        None => {
+                            warn!("could not downcast (check decoders registry). {output:?}");
+                            None
+                        }
                     }
-                    None => {
-                        warn!("could not downcast (check decoders registry). {output:?}");
-                        None
+                }
+                #[cfg(feature = "stability_pool")]
+                "multi_sig_stability_pool" => {
+                    match output.as_any().downcast_ref::<StabilityPoolOutput>() {
+                        Some(output) => {
+                            let value = serde_json::to_value(output)
+                                .expect("Should be able to serialize to JSON");
+                            debug!("found Multi-Sig Stability Pool Output: {value:?}");
+                            Some(value)
+                        }
+                        None => {
+                            warn!("could not downcast (check decoders registry). {output:?}");
+                            None
+                        }
                     }
-                },
-
+                }
                 other => {
                     warn!("Transaction Output of kind {other}. Not implemented.");
                     None
@@ -1141,8 +1181,8 @@ impl FederationObserver {
                     None
                 }
             },
-            #[cfg(feature = "stability_pool_v1")]
-            "stability_pool" => match ci.as_any().downcast_ref::<StabilityPoolConsensusItem>() {
+            #[cfg(feature = "stability_pool")]
+            "stability_pool" => match ci.as_any().downcast_ref::<StabilityPoolConsensusItemOld>() {
                 Some(ci) => {
                     let value =
                         serde_json::to_value(ci).expect("Should be able to serialize to JSON");
@@ -1154,6 +1194,21 @@ impl FederationObserver {
                     None
                 }
             },
+            #[cfg(feature = "stability_pool")]
+            "multi_sig_stability_pool" => {
+                match ci.as_any().downcast_ref::<StabilityPoolConsensusItem>() {
+                    Some(ci) => {
+                        let value =
+                            serde_json::to_value(ci).expect("Should be able to serialize to JSON");
+                        debug!("found Multi-Sig Stability Pool CI: {value:?}");
+                        Some(value)
+                    }
+                    None => {
+                        warn!("could not downcast (check decoders registry). {ci:?}");
+                        None
+                    }
+                }
+            }
             other => {
                 warn!("Consensus Item of kind {other}. Not implemented.");
                 None
@@ -1261,10 +1316,7 @@ impl FederationObserver {
 
                 let fetched_tx = retry(
                     "fetching tx from esplora".to_string(),
-                    FibonacciBuilder::default()
-                        .with_min_delay(Duration::from_secs(30))
-                        .with_max_delay(Duration::from_secs(60 * 30))
-                        .with_max_times(usize::MAX),
+                    background_backoff(),
                     || async {
                         client.get_tx_no_opt(&esplora_txid).await.map_err(|e| {
                             warn!("failed to fetch tx: {e:?}");
