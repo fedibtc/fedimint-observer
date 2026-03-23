@@ -16,7 +16,7 @@ use futures::future::join_all;
 use postgres_from_row::FromRow;
 
 use crate::federation::observer::FederationObserver;
-use crate::util::query;
+use crate::util::{cleanup_peer_url, query};
 
 impl FederationObserver {
     pub async fn monitor_health(
@@ -31,7 +31,7 @@ impl FederationObserver {
             .global
             .api_endpoints
             .iter()
-            .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone()))
+            .map(|(&peer_id, peer_url)| (peer_id, cleanup_peer_url(&peer_url.url.clone())))
             .collect();
         let api = DynGlobalApi::new(self.connectors().clone(), peers, None)?;
 

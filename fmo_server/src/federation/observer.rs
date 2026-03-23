@@ -876,7 +876,7 @@ impl FederationObserver {
                     let ln_output = output
                         .as_any()
                         .downcast_ref::<LightningOutput>()
-                        .expect("Not LN input")
+                        .expect("Not LN output")
                         .maybe_v0_ref()
                         .expect("Not v0");
                     let (maybe_amount_msat, ln_contract_interaction_kind, contract_id) =
@@ -919,7 +919,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<MintOutput>()
-                        .expect("Not Mint input")
+                        .expect("Not Mint output")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount
@@ -930,7 +930,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<WalletOutput>()
-                        .expect("Not Wallet input")
+                        .expect("Not Wallet output")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount()
@@ -959,7 +959,7 @@ impl FederationObserver {
                 let wallet_v0_output = output
                     .as_any()
                     .downcast_ref::<WalletOutput>()
-                    .expect("Not Wallet input")
+                    .expect("Not Wallet output")
                     .maybe_v0_ref()
                     .expect("Not v0");
 
@@ -1184,7 +1184,7 @@ impl FederationObserver {
                 }
             }
             other => {
-                //warn!("Consensus Item of kind {other}. Not implemented.");
+                warn!("Consensus Item of kind {other}. Not implemented.");
                 None
             }
         };
