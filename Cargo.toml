@@ -1,11 +1,21 @@
 [workspace]
-members = ["fmo_api_types", "fmo_frontend", "fmo_server"]
+members = [
+    "fmo_api_types",
+    "fmo_server",
+]
 
 resolver = "2"
 
 [workspace.dependencies]
-fedimint-core = { git = "https://github.com/fedibtc/fedimint", tag = "v0.7.0-fedi2" }
-fedimint-api-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.7.0-fedi2" }
-fedimint-ln-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.7.0-fedi2" }
-fedimint-mint-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.7.0-fedi2" }
-fedimint-wallet-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.7.0-fedi2" }
+fedimint-api-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-connectors = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-core = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-ln-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-meta-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-mint-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-wallet-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+
+[patch.crates-io]
+iroh = { git = "https://github.com/fedibtc/iroh", branch = "ma/0.35.0-no-holepunch" }
+iroh-base = { git = "https://github.com/fedibtc/iroh", branch = "ma/0.35.0-no-holepunch" }
+iroh-relay = { git = "https://github.com/fedibtc/iroh", branch = "ma/0.35.0-no-holepunch" }

@@ -14,7 +14,7 @@
         pkgs = import nixpkgs {
           inherit system;
         };
-        flakeboxLib = flakebox.lib.${system} { };
+        flakeboxLib = flakebox.lib.mkLib pkgs { };
         lib = pkgs.lib;
         stdenv = pkgs.stdenv;
 
@@ -56,8 +56,6 @@
             ".cargo"
             "fmo_api_types"
             "fmo_server"
-            "fmo_frontend"
-            "tailwind.config.js"
           ];
         };
 
@@ -68,7 +66,7 @@
                 pname = "fmo_server";
                 version = "0.1.0";
                 src = rustSrc;
-                cargoExtraArgs = "--package=fmo_server --features=stability_pool";
+                cargoExtraArgs = "--package=fmo_server";
                 RUSTFLAGS = "--cfg tokio_unstable";
               });
             in
@@ -90,47 +88,59 @@
 
             });
 
-        wasmPackages =
+        reactPackages =
           let
-            craneLib = (flakeboxLib.mkStdToolchains { }).wasm32-unknown.craneLib;
-
-            wasmArgs = {
-              src = rustSrc;
-
-              cargoExtraArgs = "--package=fmo_frontend";
-              trunkIndexPath = "fmo_frontend/index.html";
-              strictDeps = true;
-
-              pname = "fmo_frontend";
-              version = "0.1.0";
-
-              # Specify the wasm32 target
-              CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-              RUSTFLAGS = "--cfg=web_sys_unstable_apis";
-            };
-
-            cargoArtifactsWasm = craneLib.buildDepsOnly (wasmArgs // {
-              doCheck = false;
-            });
+            # Get the npm dependencies hash
+            # To update: nix build .#fmo_frontend_react_default --impure
+            # and use the hash from the error message
+            npmDepsHash = "sha256-d04Zjrg1mOhnO7FgG6rvDSh0ovt+z7PqIE8FCSG2Czk=";
           in
           rec {
-            fmo_frontend = api: craneLib.buildTrunkPackage (wasmArgs // {
-              nativeBuildInputs = with pkgs; [
-                wasm-pack
-                nodejs
-                binaryen
-                nodePackages.tailwindcss
-              ];
+            fmo_frontend_react = api: pkgs.buildNpmPackage {
+              pname = "fmo_frontend_react";
+              version = "0.1.0";
 
-              FMO_API_SERVER = api;
-
-              wasm-bindgen-cli = pkgs.wasm-bindgen-cli.override {
-                version = "0.2.92";
-                hash = "sha256-1VwY8vQy7soKEgbki4LD+v259751kKxSxmo/gqE6yV0=";
-                cargoHash = "sha256-aACJ+lYNEU8FFBs158G1/JG8sc6Rq080PeKCMnwdpH0=";
+              src = pkgs.lib.cleanSourceWith {
+                src = ./fmo_frontend_react;
+                filter = path: type:
+                  let
+                    baseName = baseNameOf path;
+                  in
+                  # Exclude common unnecessary files
+                  baseName != "node_modules" &&
+                  baseName != "dist" &&
+                  baseName != ".git";
               };
-            });
-            fmo_frontend_default = fmo_frontend "http://localhost:3000";
+
+              inherit npmDepsHash;
+
+              # Set the API base URL environment variable
+              VITE_FMO_API_BASE_URL = api;
+
+              # Build command as defined in package.json
+              buildPhase = ''
+                runHook preBuild
+                npm run build
+                runHook postBuild
+              '';
+
+              # Install the built artifacts
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out
+                cp -r dist/* $out/
+                # Copy index.html to 404.html for client-side routing (as done in CI)
+                cp $out/index.html $out/404.html
+                runHook postInstall
+              '';
+
+              meta = with pkgs.lib; {
+                description = "Fedimint Observer React Frontend";
+                license = licenses.mit;
+              };
+            };
+
+            fmo_frontend_react_default = fmo_frontend_react "http://localhost:3000/api";
           };
       in
       {
@@ -141,6 +151,9 @@
             pkgs.postgresql
             # sqlite is used only for creating the dump file for migrating existing instances
             pkgs.sqlite
+            pkgs.nixpkgs-fmt
+            # cmake is required for building aws-lc-sys (fedimint dependency)
+            pkgs.cmake
           ] ++ lib.optionals stdenv.isDarwin [
             pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
           ];
@@ -153,7 +166,7 @@
           RUSTFLAGS = "--cfg=web_sys_unstable_apis --cfg=tokio_unstable";
         };
 
-        legacyPackages = nativePackages // wasmPackages;
+        legacyPackages = nativePackages // reactPackages;
         packages.default = nativePackages.fmo_server;
       }
     );
