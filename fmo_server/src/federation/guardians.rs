@@ -16,7 +16,7 @@ use futures::future::join_all;
 use postgres_from_row::FromRow;
 
 use crate::federation::observer::FederationObserver;
-use crate::util::query;
+use crate::util::{cleanup_peer_url, query};
 
 impl FederationObserver {
     pub async fn monitor_health(
@@ -27,15 +27,13 @@ impl FederationObserver {
         const REQUEST_INTERVAL: Duration = Duration::from_secs(60);
 
         let mut interval = tokio::time::interval(REQUEST_INTERVAL);
-        let api = DynGlobalApi::from_endpoints(
-            config
-                .global
-                .api_endpoints
-                .iter()
-                .map(|(&peer_id, peer_url)| (peer_id, peer_url.url.clone())),
-            &None,
-        )
-        .await?;
+        let peers = config
+            .global
+            .api_endpoints
+            .iter()
+            .map(|(&peer_id, peer_url)| (peer_id, cleanup_peer_url(&peer_url.url.clone())))
+            .collect();
+        let api = DynGlobalApi::new(self.connectors().clone(), peers, None)?;
 
         let wallet_module = config
             .modules
@@ -124,39 +122,31 @@ impl FederationObserver {
         let health_rows = query::<GuardianHealthRow>(
             &self.connection().await?,
             // language=postgresql
-            "WITH RankedRows AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER  (PARTITION BY guardian_id ORDER BY time DESC) AS rn
-                    FROM
-                        guardian_health
-                    WHERE
-                        federation_id = $1
-                ),
-                     Last30d AS (
-                         SELECT
-                             guardian_id,
-                             (count(status)::decimal / count(*)::decimal * 100)::real as uptime,
-                             avg(latency_ms)::real as latency_ms
-                         FROM
-                             RankedRows
-                         WHERE
-                             time > NOW() - INTERVAL '30 days' and
-                             federation_id = $1
-                         group by
-                             guardian_id
-                     )
-                SELECT
-                    RankedRows.guardian_id,
-                    RankedRows.block_height,
-                    (RankedRows.status -> 'federation'  ->> 'session_count')::integer AS session_count,
-                    Last30d.uptime,
-                    Last30d.latency_ms
-                FROM
-                    RankedRows join Last30d on RankedRows.guardian_id = Last30d.guardian_id
-                WHERE
-                    rn = 1;
-                ",
+            "SELECT
+                latest.guardian_id,
+                latest.block_height,
+                (latest.status -> 'federation' ->> 'session_count')::integer AS session_count,
+                last30d.uptime,
+                last30d.latency_ms
+             FROM guardian_health latest
+             INNER JOIN (
+                 SELECT guardian_id, MAX(time) as latest_time
+                 FROM guardian_health
+                 WHERE federation_id = $1
+                 GROUP BY guardian_id
+             ) max_times ON latest.guardian_id = max_times.guardian_id
+                           AND latest.time = max_times.latest_time
+             INNER JOIN (
+                 SELECT
+                     guardian_id,
+                     (COUNT(status)::decimal / COUNT(*)::decimal * 100)::real as uptime,
+                     AVG(latency_ms)::real as latency_ms
+                 FROM guardian_health
+                 WHERE federation_id = $1
+                   AND time > NOW() - INTERVAL '30 days'
+                 GROUP BY guardian_id
+             ) last30d ON latest.guardian_id = last30d.guardian_id
+             WHERE latest.federation_id = $1",
             &[&federation_id.consensus_encode_to_vec()],
         )
         .await?;
@@ -208,34 +198,23 @@ impl FederationObserver {
         let federations = query::<FederationHealthRow>(
             &self.connection().await?,
             // language=postgresql
-            "WITH RankedRows AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (PARTITION BY federation_id, guardian_id ORDER BY time DESC) AS rn
-                    FROM
-                        guardian_health
-                    ),
-                    GuardianHealth as (
-                    SELECT
-                        RankedRows.federation_id,
-                        RankedRows.guardian_id,
-                        RankedRows.status -> 'federation'  ->> 'session_count' AS session_count
-                    FROM
-                        RankedRows
-                    WHERE
-                        rn = 1
-                    )
-                SELECT
-                    federation_id,
-                    count(*)::int as guardians,
-                    count(session_count)::int as online_guardians
-                FROM
-                    GuardianHealth
-                GROUP BY
-                    federation_id
-            ",
+            "SELECT
+                gh.federation_id,
+                COUNT(DISTINCT gh.guardian_id)::int as guardians,
+                COUNT(DISTINCT CASE WHEN gh.status -> 'federation' ->> 'session_count' IS NOT NULL
+                                   THEN gh.guardian_id END)::int as online_guardians
+             FROM guardian_health gh
+             INNER JOIN (
+                 SELECT federation_id, guardian_id, MAX(time) as latest_time
+                 FROM guardian_health
+                 GROUP BY federation_id, guardian_id
+             ) latest ON gh.federation_id = latest.federation_id
+                        AND gh.guardian_id = latest.guardian_id
+                        AND gh.time = latest.latest_time
+             GROUP BY gh.federation_id",
             &[],
-        ).await?;
+        )
+        .await?;
 
         federations
             .into_iter()

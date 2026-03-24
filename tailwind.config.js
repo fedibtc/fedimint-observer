@@ -1,1 +1,0 @@
-fmo_frontend/tailwind.config.js

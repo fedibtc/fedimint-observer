@@ -6,6 +6,7 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_core::util::SafeUrl;
 use fedimint_ln_common::LightningCommonInit;
+use fedimint_meta_common::MetaCommonInit;
 use fedimint_mint_common::MintCommonInit;
 use fedimint_wallet_common::WalletCommonInit;
 use hex::ToHex;
@@ -16,6 +17,8 @@ use stability_pool_common::StabilityPoolCommonGen;
 #[cfg(feature = "stability_pool")]
 use stability_pool_common_old::StabilityPoolCommonGen as StabilityPoolCommonGenOld;
 use tracing::debug;
+
+use crate::config::meta::MetaFields;
 
 pub fn config_to_json(cfg: ClientConfig) -> anyhow::Result<JsonClientConfig> {
     let decoders = get_decoders(
@@ -69,6 +72,7 @@ pub fn get_decoders(
                 "ln" => LightningCommonInit::decoder(),
                 "wallet" => WalletCommonInit::decoder(),
                 "mint" => MintCommonInit::decoder(),
+                "meta" => MetaCommonInit::decoder(),
                 #[cfg(feature = "stability_pool")]
                 "stability_pool" => StabilityPoolCommonGenOld::decoder(),
                 #[cfg(feature = "stability_pool")]
@@ -142,6 +146,27 @@ where
         .iter()
         .map(T::try_from_row)
         .collect::<Result<_, _>>()?)
+}
+
+/// Merges meta fields from different sources
+///
+/// * `metas` - Meta fields from different sources highest to lowest priority
+pub fn merge_metas(metas: &[MetaFields]) -> MetaFields {
+    let key_set = metas
+        .iter()
+        .flat_map(|meta| meta.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    key_set
+        .into_iter()
+        .map(|key| {
+            let value = metas
+                .iter()
+                .find_map(|meta_fields| meta_fields.get(&key).cloned())
+                .expect("Key must exist in one meta source");
+            (key, value)
+        })
+        .collect::<MetaFields>()
 }
 
 pub fn cleanup_peer_url(api_endpoint: &fedimint_core::util::SafeUrl) -> SafeUrl {

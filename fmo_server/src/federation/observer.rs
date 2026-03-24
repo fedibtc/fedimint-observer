@@ -1,15 +1,13 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, OutPoint, Txid};
 use chrono::{DateTime, NaiveDate};
 use deadpool_postgres::{GenericClient, Runtime, Transaction};
-use fedimint_api_client::api::net::Connector;
 use fedimint_api_client::api::DynGlobalApi;
+use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::config::{ClientConfig, FederationId};
 use fedimint_core::core::DynModuleConsensusItem;
 use fedimint_core::encoding::Encodable;
@@ -24,10 +22,12 @@ use fedimint_ln_common::contracts::{Contract, IdentifiableContract};
 use fedimint_ln_common::{
     LightningConsensusItem, LightningInput, LightningOutput, LightningOutputV0,
 };
+use fedimint_meta_common::MetaConsensusItem;
 use fedimint_mint_common::{MintConsensusItem, MintInput, MintOutput};
 use fedimint_wallet_common::{WalletConsensusItem, WalletInput, WalletOutput, WalletOutputV0};
 use fmo_api_types::{
     FederationActivity, FederationHealth, FederationSummary, FederationUtxo, FedimintTotals,
+    NonceSpendInfo,
 };
 use futures::future::join_all;
 use futures::StreamExt;
@@ -44,20 +44,12 @@ use tokio_postgres::NoTls;
 use tracing::log::info;
 use tracing::{debug, error, info_span, warn, Instrument};
 
-use crate::federation::db::{Federation, FederationV0};
+use crate::config::meta::{ConsensusMetaCache, MetaFieldsExt};
+use crate::db::DbMigration;
+use crate::federation::db::Federation;
 use crate::federation::{db, decoders_from_config, instance_to_kind};
 use crate::util::{cleanup_peer_url, execute, query, query_one, query_opt, query_value};
-
-type BackfillFn = for<'a> fn(
-    &'a FederationObserver,
-    &'a Transaction<'a>,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
-
-pub struct DbMigration {
-    pub index: i32,
-    pub sql: &'static str,
-    pub backfill: Option<BackfillFn>,
-}
+use crate::{migration, migration_backfill, schema_setup};
 
 #[derive(Debug, Clone)]
 pub struct FederationObserver {
@@ -65,6 +57,8 @@ pub struct FederationObserver {
     admin_auth: String,
     mempool_url: String,
     task_group: TaskGroup,
+    consensus_meta_cache: ConsensusMetaCache,
+    connectors: ConnectorRegistry,
 }
 
 impl FederationObserver {
@@ -81,11 +75,15 @@ impl FederationObserver {
             pool_config.create_pool(Some(Runtime::Tokio1), NoTls)
         }?;
 
+        let connectors = ConnectorRegistry::build_from_client_env()?.bind().await?;
+
         let slf = FederationObserver {
             connection_pool,
             admin_auth: admin_auth.to_owned(),
             mempool_url: mempool_url.to_owned(),
             task_group: Default::default(),
+            consensus_meta_cache: Default::default(),
+            connectors,
         };
 
         slf.setup_schema().await?;
@@ -102,6 +100,10 @@ impl FederationObserver {
             .spawn_cancellable("refresh views", Self::refresh_views(slf.clone()));
 
         Ok(slf)
+    }
+
+    pub fn connectors(&self) -> &ConnectorRegistry {
+        &self.connectors
     }
 
     async fn spawn_observer(&self, federation: Federation) {
@@ -178,69 +180,46 @@ impl FederationObserver {
         )
         .await?;
 
-        let schema_version =
-            query_value::<i32>(&self.connection().await?, "SELECT get_max_version();", &[]).await?;
+        let maybe_schema_version =
+            match query_value::<i32>(&self.connection().await?, "SELECT get_max_version();", &[])
+                .await?
+            {
+                -1 => {
+                    // No schema version table, assume schema is not set up
+                    info!("No schema version found, setting up schema");
+                    None
+                }
+                version => Some(version as usize),
+            };
 
         let migrations: &[DbMigration] = &[
-            DbMigration {
-                index: 0,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v0.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 1,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v1.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 2,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v2.sql")),
-                backfill: Some(|slf, dbtx| Box::pin(slf.backfill_reprocess_all_sessions(dbtx))),
-            },
-            DbMigration {
-                index: 3,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v3.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 4,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v4.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 5,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v5.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 6,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v6.sql")),
-                backfill: Some(|slf, dbtx| Box::pin(slf.backfill_v6_migrate_configs(dbtx))),
-            },
-            DbMigration {
-                index: 7,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v7.sql")),
-                backfill: None,
-            },
-            DbMigration {
-                index: 8,
-                sql: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schema/v8.sql")),
-                backfill: Some(|slf, dbtx| Box::pin(slf.backfill_reprocess_all_sessions(dbtx))),
-            },
+            schema_setup!("/schema/v0.sql"),
+            schema_setup!("/schema/v1.sql"),
+            schema_setup!("/schema/v2.sql"),
+            schema_setup!("/schema/v3.sql"),
+            schema_setup!("/schema/v4.sql"),
+            schema_setup!("/schema/v5.sql"),
+            schema_setup!("/schema/v6.sql"),
+            migration!("/schema/v7.sql"),
+            migration_backfill!(
+                "/schema/v8.sql",
+                FederationObserver::backfill_reprocess_all_sessions
+            ),
         ];
 
-        for migration in migrations.iter() {
-            if migration.index > schema_version {
+        for (index, migration) in migrations.iter().enumerate() {
+            if maybe_schema_version.is_none_or(|schema_version| index > schema_version) {
                 let mut conn = self.connection().await?;
                 let transaction = conn.transaction().await?;
                 transaction.batch_execute(migration.sql).await?;
-                if let Some(backfill_fn) = migration.backfill {
-                    info!(
-                        "Running backfill procedure for migration to V{}",
-                        migration.index
-                    );
+
+                if let Some(backfill_fn) = &migration.backfill {
+                    info!("Running backfill procedure for migration to V{}", index);
                     backfill_fn(self, &transaction).await?;
+                } else if maybe_schema_version.is_some() {
+                    bail!("Migration V{} does not have a backfill procedure but needs one since the DB is already populated. Please use an older version of Fedimint Observer to run the migration.", index);
                 }
+
                 transaction.commit().await?;
             }
         }
@@ -325,28 +304,6 @@ impl FederationObserver {
         Ok(())
     }
 
-    async fn backfill_v6_migrate_configs(&self, dbtx: &Transaction<'_>) -> anyhow::Result<()> {
-        let federations =
-            query::<FederationV0>(&self.connection().await?, "SELECT * FROM federations", &[])
-                .await?;
-        for fed in federations {
-            let config = serde_json::from_value::<ClientConfig>(
-                serde_json::to_value(fed.config).expect("serializabke"),
-            )
-            .expect("Invalid JSON");
-
-            dbtx.execute(
-                "UPDATE federations SET config = $1 WHERE federation_id = $2",
-                &[
-                    &config.consensus_encode_to_vec(),
-                    &fed.federation_id.consensus_encode_to_vec(),
-                ],
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     pub(super) async fn connection(&self) -> anyhow::Result<deadpool_postgres::Object> {
         Ok(self.connection_pool.get().await?)
     }
@@ -367,12 +324,20 @@ impl FederationObserver {
             let federation_health_ref = &federation_health;
             async move {
                 let deposits = self.get_federation_assets(federation.federation_id).await?;
-                let name = federation
-                    .config
-                    .global
-                    .meta
-                    .get("federation_name")
-                    .cloned();
+
+                let name = self
+                    .consensus_meta_cache
+                    .fetch_meta_cached(&federation.config.to_json())
+                    .await
+                    .and_then(|meta| meta.get_as::<String>("federation_name"))
+                    .or_else(|| {
+                        federation
+                            .config
+                            .global
+                            .meta
+                            .get("federation_name")
+                            .cloned()
+                    });
 
                 let health = federation_health_ref
                     .get(&federation.federation_id)
@@ -476,9 +441,8 @@ impl FederationObserver {
             return Ok(federation_id);
         }
 
-        let config = Connector::default()
-            .download_from_invite_code(invite)
-            .await?;
+        let (config, _api) =
+            fedimint_api_client::download_from_invite_code(&self.connectors, invite).await?;
 
         self.connection()
             .await?
@@ -587,15 +551,13 @@ impl FederationObserver {
         federation_id: FederationId,
         config: ClientConfig,
     ) -> anyhow::Result<()> {
-        let api = DynGlobalApi::from_endpoints(
-            config
-                .global
-                .api_endpoints
-                .iter()
-                .map(|(&peer_id, peer_url)| (peer_id, cleanup_peer_url(&peer_url.url.clone()))),
-            &None,
-        )
-        .await?;
+        let peers = config
+            .global
+            .api_endpoints
+            .iter()
+            .map(|(&peer_id, peer_url)| (peer_id, cleanup_peer_url(&peer_url.url)))
+            .collect();
+        let api = DynGlobalApi::new(self.connectors.clone(), peers, None)?;
         let decoders = decoders_from_config(&config);
 
         info!("Starting background job for {federation_id}");
@@ -788,38 +750,37 @@ impl FederationObserver {
             .await?;
 
             if kind.as_str() == "wallet" {
-                // TODO: recognize v1 wallet inputs
-                if let Some(v0_input) = input
+                let (outpoint, script) = match input
                     .as_any()
                     .downcast_ref::<WalletInput>()
                     .expect("Not Wallet input")
-                    .maybe_v0_ref()
                 {
-                    let peg_in_proof = &v0_input.0;
+                    WalletInput::V0(peg_in_proof) => {
+                        let outpoint = peg_in_proof.outpoint();
+                        let script = peg_in_proof.tx_output().script_pubkey;
+                        (outpoint, script)
+                    }
+                    WalletInput::V1(v1) => (v1.outpoint, v1.tx_out.script_pubkey.clone()),
+                    WalletInput::Default { variant, .. } => {
+                        panic!("WalletInput v{variant} not implemented");
+                    }
+                };
 
-                    let outpoint = peg_in_proof.outpoint();
-
-                    let address = bitcoin::Address::from_script(
-                        bitcoin::Script::from_bytes(
-                            peg_in_proof.tx_output().script_pubkey.as_bytes(),
-                        ),
-                        bitcoin::Network::Bitcoin,
-                    )
+                let address = bitcoin::Address::from_script(&script, bitcoin::Network::Bitcoin)
                     .expect("Invalid output address");
 
-                    dbtx.execute(
-                            "INSERT INTO wallet_peg_ins VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
-                            &[
-                                &outpoint.txid[..].to_owned(),
-                                &(outpoint.vout as i32),
-                                &address.to_string(),
-                                &maybe_amount_msat.map(|amt| amt as i64).expect("Wallet input must have amount"),
-                                &federation_id.consensus_encode_to_vec(),
-                                &fedimint_txid.consensus_encode_to_vec(),
-                                &(in_idx as i32),
-                            ]
-                        ).await?;
-                }
+                dbtx.execute(
+                        "INSERT INTO wallet_peg_ins VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+                        &[
+                            &outpoint.txid[..].to_owned(),
+                            &(outpoint.vout as i32),
+                            &address.to_string(),
+                            &maybe_amount_msat.map(|amt| amt as i64).expect("Wallet input must have amount"),
+                            &federation_id.consensus_encode_to_vec(),
+                            &fedimint_txid.consensus_encode_to_vec(),
+                            &(in_idx as i32),
+                        ]
+                    ).await?;
             }
 
             let json_txi: Option<serde_json::Value> = match kind.as_str() {
@@ -1107,6 +1068,7 @@ impl FederationObserver {
                         }
                     }
                 }
+
                 other => {
                     warn!("Transaction Output of kind {other}. Not implemented.");
                     None
@@ -1174,6 +1136,18 @@ impl FederationObserver {
                     let value =
                         serde_json::to_value(ci).expect("Should be able to serialize to JSON");
                     debug!("found Lightning CI: {value:?}");
+                    Some(value)
+                }
+                None => {
+                    warn!("could not downcast (check decoders registry). {ci:?}");
+                    None
+                }
+            },
+            "meta" => match ci.as_any().downcast_ref::<MetaConsensusItem>() {
+                Some(ci) => {
+                    let value =
+                        serde_json::to_value(ci).expect("Should be able to serialize to JSON");
+                    debug!("found Meta CI: {value:?}");
                     Some(value)
                 }
                 None => {
@@ -1525,6 +1499,67 @@ impl FederationObserver {
             &[],
         )
         .await? as u32)
+    }
+
+    pub async fn get_nonces_spend_info(
+        &self,
+        federation_id: FederationId,
+        nonces: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, NonceSpendInfo>> {
+        use chrono::{DateTime, Utc};
+
+        if nonces.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let _ = self
+            .get_federation(federation_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Federation doesn't exist"))?;
+
+        #[derive(Debug, FromRow)]
+        struct NonceSpendRow {
+            nonce: String,
+            session_index: i32,
+            estimated_session_timestamp: Option<chrono::NaiveDateTime>,
+        }
+
+        // Extract nonce from JSONB: {"V0": {"note": {"nonce": "..."}}}
+        // language=postgresql
+        let sql = "
+            SELECT
+                tid.details->'V0'->'note'->>'nonce' AS nonce,
+                t.session_index,
+                st.estimated_session_timestamp
+            FROM transaction_input_details tid
+            JOIN transactions t ON tid.federation_id = t.federation_id AND tid.txid = t.txid
+            LEFT JOIN session_times st ON t.federation_id = st.federation_id AND t.session_index = st.session_index
+            WHERE tid.federation_id = $1
+              AND tid.kind = 'mint'
+              AND tid.details->'V0'->'note'->>'nonce' = ANY($2)
+        ";
+
+        let rows = query::<NonceSpendRow>(
+            &self.connection().await?,
+            sql,
+            &[&federation_id.consensus_encode_to_vec(), &nonces],
+        )
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.nonce,
+                    NonceSpendInfo {
+                        session_index: row.session_index as u64,
+                        estimated_timestamp: row
+                            .estimated_session_timestamp
+                            .map(|ts| DateTime::<Utc>::from_naive_utc_and_offset(ts, Utc)),
+                    },
+                )
+            })
+            .collect())
     }
 
     pub async fn backfill_federation(

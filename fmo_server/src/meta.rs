@@ -1,16 +1,18 @@
 use axum::Json;
 use fedimint_core::config::JsonClientConfig;
-use fedimint_core_v3::config::META_OVERRIDE_URL_KEY;
 use tracing::debug;
 use tracing::log::warn;
 
 use crate::config::meta::{parse_meta_lenient, MetaFields};
+use crate::util::merge_metas;
 use crate::AppState;
 
 pub async fn federation_meta(
     cfg: &JsonClientConfig,
     state: &AppState,
 ) -> crate::error::Result<Json<MetaFields>> {
+    let maybe_consensus_meta = state.consensus_meta_cache.fetch_meta_cached(cfg).await;
+
     let meta_fields_config = parse_meta_lenient(
         cfg.global
             .meta
@@ -18,8 +20,8 @@ pub async fn federation_meta(
             .map(|(key, value)| (key.to_owned(), value.to_owned().into())),
     );
 
-    let meta_fields = if let Some(override_url) = meta_fields_config
-        .get(META_OVERRIDE_URL_KEY)
+    let maybe_meta_override = if let Some(override_url) = meta_fields_config
+        .get("meta_override_url")
         .or_else(|| meta_fields_config.get("meta_external_url")) // Fedi legacy field
         .and_then(|url| url.as_str().map(ToOwned::to_owned))
     {
@@ -35,14 +37,14 @@ pub async fn federation_meta(
                 return Ok(meta_fields_config.into());
             }
         };
-
-        meta_fields_config
-            .into_iter()
-            .chain(meta_override)
-            .collect::<MetaFields>()
+        Some(meta_override)
     } else {
-        meta_fields_config
+        None
     };
 
-    Ok(meta_fields.into())
+    Ok(Json(merge_metas(&[
+        maybe_consensus_meta.unwrap_or_default(),
+        maybe_meta_override.unwrap_or_default(),
+        meta_fields_config,
+    ])))
 }
