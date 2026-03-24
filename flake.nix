@@ -34,6 +34,7 @@
               trunk
               nodejs
               nodePackages.tailwindcss
+              cmake
             ];
           };
           targets = (pkgs.lib.getAttrs
