@@ -13,7 +13,7 @@ fedimint-ln-common = { workspace = true }
 fedimint-meta-client = { workspace = true }
 fedimint-mint-common = { workspace = true }
 fedimint-wallet-common = { workspace = true }
-fedimint-meta-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-meta-common = { workspace = true }
 
 anyhow = "1.0.81"
 async-stream = "0.3.5"
@@ -52,8 +52,8 @@ regex = "1.10.4"
 # The `stability_pool` feature requires two different versions of the `stability-pool-common` crate.
 # stability-pool-common-old is associated with the kind = stability_pool
 # stability-pool-common is associated with the kind = multi_sig_stability_pool
-stability-pool-common-old = { git = "https://github.com/fedixyz/fedi", tag = "26.3.1", optional = true, package = "stability-pool-common-old" }
-stability-pool-common = { git = "https://github.com/fedixyz/fedi", tag = "26.3.1", optional = true }
+stability-pool-common-old = { git = "https://github.com/fedixyz/fedi", tag = "26.4.2", optional = true, package = "stability-pool-common-old" }
+stability-pool-common = { git = "https://github.com/fedixyz/fedi", tag = "26.4.2", optional = true }
 
 [features]
 # This feature is optional and intended for specific deployments that require stability pool functionality.
