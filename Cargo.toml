@@ -7,13 +7,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-fedimint-api-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-connectors = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-core = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-ln-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-meta-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-mint-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
-fedimint-wallet-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi8" }
+fedimint-api-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-connectors = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-core = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-ln-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-meta-client = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-meta-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-mint-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
+fedimint-wallet-common = { git = "https://github.com/fedibtc/fedimint", tag = "v0.10.0-fedi17" }
 
 [patch.crates-io]
 iroh = { git = "https://github.com/fedibtc/iroh", branch = "ma/0.35.0-no-holepunch" }
