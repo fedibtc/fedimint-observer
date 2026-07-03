@@ -84,6 +84,7 @@ Required environment variables (see `sample.env`):
 - `FO_DATABASE`: PostgreSQL connection string
 - `FO_ADMIN_AUTH`: Admin authentication password
 - `FO_MEMPOOL_URL`: Mempool API URL (default: "https://mempool.space/api")
+- `FO_VIEW_REFRESH_INTERVAL_SECS`: Seconds to wait between materialized view refreshes (default: 60)
 - `ALLOW_CONFIG_CORS`: Enable CORS for config endpoints
 
 ### API Endpoints
