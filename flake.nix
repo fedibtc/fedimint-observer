@@ -33,7 +33,7 @@
               wasm-pack
               trunk
               nodejs
-              nodePackages.tailwindcss
+              tailwindcss
               cmake
             ];
           };
