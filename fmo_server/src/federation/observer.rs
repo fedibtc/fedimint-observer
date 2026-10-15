@@ -22,7 +22,6 @@ use fedimint_ln_common::contracts::{Contract, IdentifiableContract};
 use fedimint_ln_common::{
     LightningConsensusItem, LightningInput, LightningOutput, LightningOutputV0,
 };
-use fedimint_meta_common::MetaConsensusItem;
 use fedimint_mint_common::{MintConsensusItem, MintInput, MintOutput};
 use fedimint_wallet_common::{WalletConsensusItem, WalletInput, WalletOutput, WalletOutputV0};
 use fmo_api_types::{
@@ -136,7 +135,7 @@ impl FederationObserver {
 
         let slf = self.clone();
         let federation_id = federation.federation_id;
-        let config = federation.config;
+        let config = federation.config.clone();
         self.task_group.spawn_cancellable(
             format!("Health Monitor for {}", federation_id),
             async move {
@@ -150,6 +149,24 @@ impl FederationObserver {
                 }
             }
             .instrument(info_span!("health", fed = %federation_id.to_prefix())),
+        );
+
+        let slf = self.clone();
+        let federation_id = federation.federation_id;
+        let config = federation.config;
+        self.task_group.spawn_cancellable(
+            format!("Gateway Monitor for {}", federation_id),
+            async move {
+                loop {
+                    let e = slf
+                        .monitor_gateways(federation_id, config.clone())
+                        .await
+                        .expect_err("gateway monitor task exited unexpectedly");
+                    error!("Gateway Monitor errored, restarting in 30s: {e}");
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+            .instrument(info_span!("gateways", fed = %federation_id.to_prefix())),
         );
     }
 
@@ -214,6 +231,7 @@ impl FederationObserver {
                 FederationObserver::backfill_reprocess_all_sessions
             ),
             migration!("/schema/v9.sql"),
+            migration!("/schema/v10.sql"),
         ];
 
         for (index, migration) in migrations.iter().enumerate() {
@@ -885,7 +903,7 @@ impl FederationObserver {
                     let ln_output = output
                         .as_any()
                         .downcast_ref::<LightningOutput>()
-                        .expect("Not LN output")
+                        .expect("Not LN input")
                         .maybe_v0_ref()
                         .expect("Not v0");
                     let (maybe_amount_msat, ln_contract_interaction_kind, contract_id) =
@@ -928,7 +946,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<MintOutput>()
-                        .expect("Not Mint output")
+                        .expect("Not Mint input")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount
@@ -939,7 +957,7 @@ impl FederationObserver {
                     let amount_msat = output
                         .as_any()
                         .downcast_ref::<WalletOutput>()
-                        .expect("Not Wallet output")
+                        .expect("Not Wallet input")
                         .maybe_v0_ref()
                         .expect("Not v0")
                         .amount()
@@ -968,7 +986,7 @@ impl FederationObserver {
                 let wallet_v0_output = output
                     .as_any()
                     .downcast_ref::<WalletOutput>()
-                    .expect("Not Wallet output")
+                    .expect("Not Wallet input")
                     .maybe_v0_ref()
                     .expect("Not v0");
 
@@ -1145,18 +1163,6 @@ impl FederationObserver {
                     let value =
                         serde_json::to_value(ci).expect("Should be able to serialize to JSON");
                     debug!("found Lightning CI: {value:?}");
-                    Some(value)
-                }
-                None => {
-                    warn!("could not downcast (check decoders registry). {ci:?}");
-                    None
-                }
-            },
-            "meta" => match ci.as_any().downcast_ref::<MetaConsensusItem>() {
-                Some(ci) => {
-                    let value =
-                        serde_json::to_value(ci).expect("Should be able to serialize to JSON");
-                    debug!("found Meta CI: {value:?}");
                     Some(value)
                 }
                 None => {
@@ -1485,13 +1491,17 @@ impl FederationObserver {
             .filter(|&health| *health == FederationHealth::Offline)
             .count() as u64;
 
+        // Reads the counters maintained by the triggers introduced in v9 instead of
+        // aggregating over `transactions` and `transaction_inputs`, which meant a full
+        // scan of both tables (~1.3GB) on every request.
         let totals = query_one::<FedimintTotalsResult>(
             &self.connection().await?,
             // language=postgresql
             "
-                SELECT (SELECT count(*) from federations)::bigint               as federations,
-                       (SELECT count(*) from transactions)::bigint               as tx_count,
-                       (SELECT sum(amount_msat) from transaction_inputs)::bigint as tx_volume
+                SELECT (SELECT count(*) from federations)::bigint as federations,
+                       COALESCE(sum(tx_count), 0)::bigint         as tx_count,
+                       COALESCE(sum(tx_volume_msat), 0)::bigint   as tx_volume
+                FROM federation_totals
             ",
             &[],
         )
