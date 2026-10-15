@@ -16,7 +16,6 @@
         };
         flakeboxLib = flakebox.lib.mkLib pkgs { };
         lib = pkgs.lib;
-        stdenv = pkgs.stdenv;
 
         toolchains = flakeboxLib.mkFenixToolchain {
           components = [
@@ -29,11 +28,7 @@
 
           args = {
             nativeBuildInputs = with pkgs; [
-              wasm-bindgen-cli
-              wasm-pack
-              trunk
-              nodejs
-              tailwindcss
+              # cmake is required for building aws-lc-sys (fedimint dependency)
               cmake
             ];
           };
@@ -46,17 +41,14 @@
           );
         };
 
-        rustSrc = flakeboxLib.filterSubPaths {
-          root = builtins.path {
-            name = "fmo";
-            path = ./.;
-          };
-          paths = [
-            "Cargo.toml"
-            "Cargo.lock"
-            ".cargo"
-            "fmo_api_types"
-            "fmo_server"
+        rustSrc = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./Cargo.toml
+            ./Cargo.lock
+            (lib.fileset.maybeMissing ./.cargo)
+            ./fmo_api_types
+            ./fmo_server
           ];
         };
 
@@ -155,8 +147,6 @@
             pkgs.nixpkgs-fmt
             # cmake is required for building aws-lc-sys (fedimint dependency)
             pkgs.cmake
-          ] ++ lib.optionals stdenv.isDarwin [
-            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
           ];
 
           shellHook = ''

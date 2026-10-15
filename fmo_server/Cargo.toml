@@ -1,6 +1,6 @@
 [package]
 name = "fmo_server"
-version = "0.4.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -13,7 +13,6 @@ fedimint-ln-common = { workspace = true }
 fedimint-meta-client = { workspace = true }
 fedimint-mint-common = { workspace = true }
 fedimint-wallet-common = { workspace = true }
-fedimint-meta-common = { workspace = true }
 
 anyhow = "1.0.81"
 async-stream = "0.3.5"
@@ -49,12 +48,12 @@ chrono = { version = "0.4.38", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 regex = "1.10.4"
 
-# The `stability_pool` feature requires two different versions of the `stability-pool-common` crate.
-# stability-pool-common-old is associated with the kind = stability_pool
-# stability-pool-common is associated with the kind = multi_sig_stability_pool
-stability-pool-common-old = { git = "https://github.com/fedixyz/fedi", tag = "26.4.2", optional = true, package = "stability-pool-common-old" }
-stability-pool-common = { git = "https://github.com/fedixyz/fedi", tag = "26.4.2", optional = true }
+# The `stability_pool` feature decodes both stability pool modules:
+# stability-pool-common-old for kind = stability_pool,
+# stability-pool-common for kind = multi_sig_stability_pool.
+# The rev builds on the same fedibtc/fedimint tag as the workspace.
+stability-pool-common-old = { git = "https://github.com/fedixyz/fedi", rev = "59e406974ccf7d0cd1d719a78e6cc46fd51870e6", optional = true, package = "stability-pool-common-old" }
+stability-pool-common = { git = "https://github.com/fedixyz/fedi", rev = "59e406974ccf7d0cd1d719a78e6cc46fd51870e6", optional = true }
 
 [features]
-# This feature is optional and intended for specific deployments that require stability pool functionality.
 stability_pool = ["dep:stability-pool-common-old", "dep:stability-pool-common"]

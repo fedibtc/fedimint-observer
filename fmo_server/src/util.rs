@@ -6,7 +6,6 @@ use fedimint_core::module::registry::ModuleDecoderRegistry;
 use fedimint_core::module::CommonModuleInit;
 use fedimint_core::util::SafeUrl;
 use fedimint_ln_common::LightningCommonInit;
-use fedimint_meta_common::MetaCommonInit;
 use fedimint_mint_common::MintCommonInit;
 use fedimint_wallet_common::WalletCommonInit;
 use hex::ToHex;
@@ -72,7 +71,6 @@ pub fn get_decoders(
                 "ln" => LightningCommonInit::decoder(),
                 "wallet" => WalletCommonInit::decoder(),
                 "mint" => MintCommonInit::decoder(),
-                "meta" => MetaCommonInit::decoder(),
                 #[cfg(feature = "stability_pool")]
                 "stability_pool" => StabilityPoolCommonGenOld::decoder(),
                 #[cfg(feature = "stability_pool")]
